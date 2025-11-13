@@ -5,7 +5,7 @@ from PIL import Image
 import numpy as np
 import os
 import time
-import requests # For downloading
+# import requests # No longer needed
 import warnings
 
 # --- Configuration ---
@@ -20,78 +20,50 @@ warnings.filterwarnings('ignore', category=UserWarning, module='tensorflow')
 
 # --- Class Names ---
 CLASS_NAMES = ['biodegradable', 'hazardous', 'non_biodegradable', 'recyclable']
-MODEL_DIR = os.path.join(os.getcwd(), 'models_cache') # Cache models here
-os.makedirs(MODEL_DIR, exist_ok=True) 
+# The models are in the 'runs' folder, relative to this app.py
+MODEL_DIR = "runs" 
 
-# --- (NEW) Robust Google Drive Download Function ---
-@st.cache_data(show_spinner=False) # Cache the download
-def download_model(file_id, local_path):
-    if not os.path.exists(local_path):
-        with st.spinner(f"Downloading {os.path.basename(local_path)}... (This happens once)"):
-            URL = "https://docs.google.com/uc?export=download"
-            session = requests.Session()
-            
-            try:
-                # First, send a request to get the download confirmation cookie
-                response = session.get(URL, params={"id": file_id}, stream=True)
-                token = None
-                for key, value in response.cookies.items():
-                    if key.startswith("download_warning"):
-                        token = value
-                        break
-                
-                # If a token was found (meaning Google showed a warning),
-                # send a second request with the confirmation token
-                if token:
-                    params = {"id": file_id, "confirm": token}
-                    response = session.get(URL, params=params, stream=True)
-                
-                # Now, save the file content
-                with open(local_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=32768):
-                        if chunk:
-                            f.write(chunk)
-            except Exception as e:
-                st.error(f"Error downloading model {os.path.basename(local_path)}: {e}")
-                return None
-    return local_path
+# --- (REMOVED) Google Drive Download Function ---
+# We are loading directly from the repo, so this is no longer needed.
 
 # --- (MODIFIED) Load Models ---
 @st.cache_resource
 def load_yolo_model():
-    local_path = os.path.join(MODEL_DIR, 'best.pt')
-    # This is your YOLO model's File ID
-    file_id = "1ape52G9_LQqsTMSCNhUXXwX_yfC-EpJR" 
-    if download_model(file_id, local_path):
-        try:
-            return YOLO(local_path)
-        except Exception as e:
-            st.error(f"Error loading YOLO model ({local_path}): {e}")
+    # Load from the local path
+    # *** IMPORTANT ***
+    # Make sure 'best.pt' is in your 'runs' folder in GitHub!
+    local_path = os.path.join(MODEL_DIR, 'best.pt') 
+    try:
+        model = YOLO(local_path)
+        return model
+    except Exception as e:
+        st.error(f"Error loading YOLO model ({local_path}): {e}")
+        st.info("Please make sure 'best.pt' exists in the 'runs' folder of your GitHub repo.")
     return None
 
 @st.cache_resource
 def load_mobilenet_model():
+    # Load from the local path
     local_path = os.path.join(MODEL_DIR, 'mobilenetv3_finetuned.keras')
-    # This is your NEW MobileNet File ID
-    file_id = "1kTvKJ-HufN4IH3KKXfxsYc03BM-hygG1" 
-    if download_model(file_id, local_path):
-        try:
-            return tf.keras.models.load_model(local_path)
-        except Exception as e:
-            st.error(f"Error loading MobileNetV3 model ({local_path}): {e}")
+    try:
+        model = tf.keras.models.load_model(local_path)
+        return model
+    except Exception as e:
+        st.error(f"Error loading MobileNetV3 model ({local_path}): {e}")
+        st.info("Please make sure 'mobilenetv3_finetuned.keras' exists in the 'runs' folder.")
     return None
 
 @st.cache_resource
 def load_cnn_model():
+    # Load from the local path
     local_path = os.path.join(MODEL_DIR, 'simple_cnn.h5')
-    # This is your NEW CNN File ID
-    # !!! WARNING: This is the SAME ID as MobileNet !!!
-    file_id = "1kTvKJ-HufN4IH3KKXfxsYc03BM-hygG1" 
-    if download_model(file_id, local_path):
-        try:
-            return tf.keras.models.load_model(local_path)
-        except Exception as e:
-            st.error(f"Error loading Simple CNN model ({local_path}): {e}")
+    try:
+        model = tf.keras.models.load_model(local_path)
+        return model
+    except Exception as e:
+        # This error will likely trigger if the file_id is wrong
+        st.error(f"Error loading Simple CNN model ({local_path}): {e}")
+        st.info("Please make sure 'simple_cnn.h5' exists in the 'runs' folder.")
     return None
 
 @st.cache_resource
@@ -100,17 +72,32 @@ def load_general_detector():
 
 # --- Preprocessing ---
 def preprocess_image_for_keras(img_pil):
+    """Prepares a PIL image for MobileNet/CNN prediction."""
     img_rgb = img_pil.convert('RGB')
     img = img_rgb.resize((224, 224))
     img_array = tf.keras.preprocessing.image.img_to_array(img)
     img_array = np.expand_dims(img_array, axis=0)
-    # img_array = img_array / 255.0 # Keep this commented out
+    # Keras models from `tf.keras.applications` often expect pixels in the range [0, 255]
+    # or [-1, 1] depending on the `preprocess_input` function used during training.
+    # Your original code did not normalize (e.g., / 255.0), so we follow that.
+    # If your model was trained with normalization, uncomment the line below:
+    # img_array = img_array / 255.0 
     return img_array
 
 # --- Non-Waste Detection Logic ---
 def is_likely_non_waste(img_pil, detector):
+    """
+    Checks if an image contains common non-waste objects (people, animals, etc.).
+    Returns (True, "object_name") if non-waste is detected.
+    """
     results = detector(img_pil, verbose=False)
-    non_waste_classes = [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16, 17, 18, 19, 20, 21, 22, 23, 56, 57, 58, 59, 60, 61, 62, 63 ]
+    # COCO class IDs for common non-waste items
+    non_waste_classes = [ 
+        0, # person
+        1, 2, 3, 4, 5, 6, 7, 8, # vehicle (bicycle, car, ...)
+        15, 16, 17, 18, 19, 20, 21, 22, 23, # animal (bird, cat, dog, ...)
+        56, 57, 58, 59, 60, 61, 62, 63 # indoor (chair, couch, ...)
+    ]
     for result in results:
         for box in result.boxes:
             class_id = int(box.cls[0])
@@ -119,7 +106,7 @@ def is_likely_non_waste(img_pil, detector):
                 return True, detector.names[class_id]
     return False, None
 
-# --- Main UI (No changes below this line) ---
+# --- Main UI ---
 st.title("♻️ Baguio City Waste Classification System")
 st.write("Upload an image or use your camera to classify waste.")
 
@@ -156,20 +143,27 @@ if img_pil is not None:
         if st.button("Classify Waste", use_container_width=True, type="primary"):
             is_not_waste = False
             detected_object = None
+            
+            # 1. Safety Filter Check
             if enable_safety_filter:
                 with st.spinner("Checking for non-waste objects..."):
                     detector = load_general_detector()
                     is_not_waste, detected_object = is_likely_non_waste(img_pil, detector)
+            
+            # 2. Display Safety Warning OR Classify
             if is_not_waste:
                 st.error(f"⚠️ **Alert: Non-Waste Detected**")
                 st.warning(f"The system detected a **{detected_object}**. This does not appear to be waste.")
                 st.info("Please upload an image of waste material (bottles, paper, plastic, etc.).")
             else:
+                # 3. Classify Waste
                 prediction = "Error"
                 confidence = 0.0
                 model_name = model_choice.split(' ')[0]
+                
                 with st.spinner(f"Classifying with {model_name}..."):
                     start_time = time.time()
+                    
                     if model_name == 'YOLOv8-Cls':
                         model = load_yolo_model()
                         if model:
@@ -178,6 +172,7 @@ if img_pil is not None:
                             confidence = probs.top1conf.item() 
                             prediction_idx = probs.top1
                             prediction = CLASS_NAMES[prediction_idx]
+                            
                     elif model_name == 'MobileNetV3':
                         model = load_mobilenet_model()
                         if model:
@@ -186,6 +181,7 @@ if img_pil is not None:
                             confidence = np.max(probs)
                             prediction_idx = np.argmax(probs)
                             prediction = CLASS_NAMES[prediction_idx]
+                            
                     elif model_name == 'Simple':
                         model = load_cnn_model()
                         if model:
@@ -194,14 +190,18 @@ if img_pil is not None:
                             confidence = np.max(probs)
                             prediction_idx = np.argmax(probs)
                             prediction = CLASS_NAMES[prediction_idx]
+                    
                     end_time = time.time()
                     inference_time = (end_time - start_time) * 1000
+                
+                # 4. Display Results
                 st.subheader(f"Prediction: {model_name}")
                 if confidence < 0.45: 
                     st.warning(f"⚠️ **Low Confidence ({confidence*100:.2f}%)**")
                     st.write(f"The model thinks this is **{prediction}**, but is not sure.")
                     st.info("Please ensure the waste item is centered and clearly visible.")
                 else:
+                    # Display formatted results
                     if prediction == "recyclable":
                         st.success(f"**{prediction.upper()}** (Confidence: {confidence*100:.2f}%)")
                         st.info("✅ **Baguio City Guideline:** Place in **Recyclable** bin.\n\n*Examples: Bottles, cans, paper, cardboard.*")
@@ -214,4 +214,5 @@ if img_pil is not None:
                     else: # non_biodegradable
                         st.info(f"**{prediction.upper()}** (Confidence: {confidence*100:.2f}%)")
                         st.info("ℹ️ **Baguio City Guideline:** Place in **Residual/Landfill** bin.\n\n*Examples: Styrofoam, candy wrappers, diapers.*")
+                
                 st.caption(f"Inference time: {inference_time:.2f} ms")
