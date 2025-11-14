@@ -5,7 +5,8 @@ from PIL import Image
 import numpy as np
 import os
 import time
-# import requests # No longer needed
+import requests # <-- (RE-ADD) Need this for URL downloading
+from io import BytesIO # <-- (NEW) Need this to open image from bytes
 import warnings
 
 # --- Configuration ---
@@ -109,6 +110,35 @@ def load_cnn_model():
 def load_general_detector():
     return YOLO('yolov8n.pt') # This one downloads itself
 
+# --- (NEW) Helper function to load image from URL ---
+@st.cache_data(ttl=600) # Cache downloaded images for 10 minutes
+def load_image_from_url(url):
+    """Downloads an image from a URL and returns it as a PIL Image."""
+    try:
+        # Use a user-agent to avoid 403 Forbidden errors
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
+        response = requests.get(url, headers=headers, stream=True, timeout=10)
+        response.raise_for_status() # Check for bad responses (404, 500, etc.)
+        
+        # Check if content-type is an image
+        content_type = response.headers.get('content-type')
+        if not content_type or not content_type.startswith('image/'):
+            st.error(f"Error: URL does not point to a valid image. (Content-Type: {content_type})")
+            return None
+
+        # Read content into BytesIO and open with PIL
+        img = Image.open(BytesIO(response.content))
+        return img
+    except requests.exceptions.Timeout:
+        st.error("Error: The image download timed out.")
+        return None
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error downloading image: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Error processing image from URL. Is it a valid image file?")
+        return None
+
 # --- (MODIFIED) Preprocessing ---
 def preprocess_image_for_keras(img_pil, model_name):
     """Prepares a PIL image for MobileNet/CNN prediction."""
@@ -151,7 +181,7 @@ def is_likely_non_waste(img_pil, detector):
 
 # --- Main UI ---
 st.title("♻️ Baguio City Waste Classification System")
-st.write("Upload an image or use your camera to classify waste.")
+st.write("Upload an image, use your camera, or paste a URL to classify waste.")
 
 with st.sidebar:
     st.header("Settings")
@@ -164,8 +194,12 @@ with st.sidebar:
     st.divider()
     st.info("This app compares models for the Baguio City waste management thesis.")
 
-tab1, tab2 = st.tabs(["📁 Upload Image", "📸 Live Camera"])
+# --- (MODIFIED) Add a new tab for URL ---
+tab1, tab2, tab3 = st.tabs(["📁 Upload Image", "📸 Live Camera", "🔗 Paste URL"])
 camera_file = None 
+image_url = None
+uploaded_file = None
+
 with tab1:
     uploaded_file = st.file_uploader("Choose a waste image...", type=["jpg", "jpeg", "png", "webp", "jfif"])
 with tab2:
@@ -173,11 +207,23 @@ with tab2:
         camera_file = st.camera_input("Take a picture")
     else:
         st.info("Live camera is disabled. Enable it in the sidebar settings.")
+# --- (NEW) Content for the URL tab ---
+with tab3:
+    image_url = st.text_input("Paste an image URL:", placeholder="https://example.com/image.jpg")
+    st.info("Note: The URL must be a direct link to an image (e.g., end in .jpg, .png).")
+
 
 img_pil = None
-if uploaded_file: img_pil = Image.open(uploaded_file)
-elif camera_file: img_pil = Image.open(camera_file) 
+# --- (MODIFIED) Logic to load the image from one of the 3 sources ---
+if uploaded_file: 
+    img_pil = Image.open(uploaded_file)
+elif camera_file: 
+    img_pil = Image.open(camera_file) 
+elif image_url:
+    with st.spinner("Downloading image from URL..."):
+        img_pil = load_image_from_url(image_url)
 
+# --- (MODIFIED) This logic now runs if any of the 3 methods provides an image ---
 if img_pil is not None:
     col1, col2 = st.columns(2)
     with col1:
